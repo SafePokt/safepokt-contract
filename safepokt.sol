@@ -6,7 +6,7 @@ import "./utils/ContractGuard.sol";
 import "./utils/SafeERC20Upgradeable.sol";
 import "./utils/SafeMathUpgradeable.sol";
 
-contract SafePOKT is ContractGuard {
+contract SafePOKTnew is ContractGuard {
     //Libraries
     using SafeERC20Upgradeable for IERC20Upgradeable;
     using AddressUpgradeable for address;
@@ -91,12 +91,14 @@ contract SafePOKT is ContractGuard {
 
     uint256 public totalEpochPoktCompound;
     uint256 public totalPOKTStake;
+
+    uint256 public nodeDiscount;
     /* ========== EVENTS ========== */
     // Operator
     event Initialized(address operator, uint256 at);
     event WidthdrawToOperator(uint256 amount);
     event ClaimTreasuryFee(address treasury, uint256 fee_amount);
-    event RewardAdded(uint256 snapshotIndex, uint256 poktDistribution, uint256 usdDistribution, uint256 epochSellPrice, uint256 poktUnhold);
+    event RewardAdded(uint256 snapshotIndex, uint256 poktDistribution, uint256 usdDistribution, uint256 epochSellPrice, uint256 poktUnhold, uint256 poktCompound);
     event BuyPriceUpdate(uint256 newPrice);
     event NodeAdded(uint256 newNodes, uint256 numNodes, uint256 newPOKT, uint256 stakedPOKT);
     event HolderActionsToggled(bool enabled);
@@ -291,6 +293,10 @@ contract SafePOKT is ContractGuard {
         fee = _fee;
     }
 
+    function setNodeDiscount(uint256 _discount) external onlyOperator {
+        nodeDiscount = _discount;
+    }
+
     function addNodeHolder(address _address) external onlyOperator {
         nodeHolders.push(_address);
     }
@@ -348,15 +354,15 @@ contract SafePOKT is ContractGuard {
 
         totalClaimableRewards = totalClaimableRewards.add( totalTokenReward.sub(feevalue) );
         totalInvestedShares = totalPoktShares;
-        totalEpochPoktCompound = 0;
+
 
         IERC20Upgradeable( protToken ).safeTransferFrom(
             msg.sender,
             address(this),
             totalTokenReward
         );
-        emit RewardAdded( latestSnapshotIndex(), _amountPokt, _amountProtToken, _epochSellPrice, _amountPoktUnhold );
-
+        emit RewardAdded( latestSnapshotIndex(), _amountPokt, _amountProtToken, _epochSellPrice, _amountPoktUnhold, totalEpochPoktCompound );
+        totalEpochPoktCompound = 0;
         //stats
         totalPOKTRewards = totalPOKTRewards.add( _amountPokt );
         totalPOKTwithdraw = totalPOKTwithdraw.add( _amountPoktUnhold.add( _amountPokt.mul(tokenDecimals).div(_epochSellPrice) ) );
@@ -459,11 +465,21 @@ contract SafePOKT is ContractGuard {
         return seat;
     }
 
+    function compute_discount(uint256 _amountShares) internal returns (uint256) {
+        if (_amountShares >= 770) {
+            uint256 discount;
+            if (_amountShares >= 1540) discount = nodeDiscount;
+            else discount = nodeDiscount.div(2);
+            return ( discount.mul( poktBuyPrice.mul(sharePoktNum).mul(_amountShares) ).div(100) );
+        }
+        return 0;
+    }
+
     function buyPoktShares(address _token, uint256 _amountShares) external onlyHolderActionsEnabled onlyOneBlock updateReward(msg.sender) {
         require(protToken == _token, "not protocol token");
         require(_amountShares >= 1, "min purchase is 1 share");
 
-        uint256 _amountWei = poktBuyPrice.mul(sharePoktNum).mul(_amountShares);
+        uint256 _amountWei = poktBuyPrice.mul(sharePoktNum).mul(_amountShares).sub(compute_discount(_amountShares));
         IERC20Upgradeable(protToken).safeTransferFrom(
             msg.sender,
             address(this),
