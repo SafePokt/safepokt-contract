@@ -6,7 +6,7 @@ import "./utils/ContractGuard.sol";
 import "./utils/SafeERC20Upgradeable.sol";
 import "./utils/SafeMathUpgradeable.sol";
 
-contract SafePOKTnew is ContractGuard {
+contract SafePOKT is ContractGuard {
     //Libraries
     using SafeERC20Upgradeable for IERC20Upgradeable;
     using AddressUpgradeable for address;
