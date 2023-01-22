@@ -42,7 +42,7 @@ contract SafePOKT is ContractGuard {
         uint256 poktSellPrice; // $POKT-$USDC epoch price rate
 
         // reserved vars for future implementations (just memory allocated btw)
-        uint256 feature1;
+        uint256 feature1; //USED from Jan/23 - maps each epoch duration in ms
         uint256 feature2;
         // Epoch stats
         uint256 rewardDeposit; // Total $USDC claimable deposited in the contract
@@ -70,8 +70,8 @@ contract SafePOKT is ContractGuard {
     mapping(address => Poktseat) public holders;
     SafePoktSnapshot[] public safePoktHistory;
 
-    // Pocket Network Holders array
-    uint256 public holderCount; //integer
+    uint256 public holderCount; //integer - Pocket Network Holders
+    // Node management - UNUSED
     address[] private holdersEnum; //Set to private to avoid user enumeration
     uint256 public totalNodeCount; //integer
     address[] public nodeHolders;
@@ -87,12 +87,28 @@ contract SafePOKT is ContractGuard {
     bool public initialized;
 
     uint256 public tokenDecimals; //integer (=10^6)
-    uint256 public sharePoktNum; // 1share price = 10 * poktBuyPrice
+    uint256 public sharePoktNum; // 1share price = 10 * poktBuyPrice - UNUSED since Jan/23
 
     uint256 public totalEpochPoktCompound;
     uint256 public totalPOKTStake;
 
-    uint256 public nodeDiscount;
+    uint256 public nodeDiscount; // (%) max discount from share price
+    //uint256 public maxDiscountShares; UNUSED ONLY FOR TESTING
+
+    uint256 public nextEpochDate; // Millisecond date
+    uint256 public epochDuration; // ms increment (1 week = 604800000)
+
+    uint256 nextDistributionPoktRPS;
+
+    struct BuyOnDemand {
+        address holder;
+        uint256 amountUSDC;
+        uint256 time;
+    }
+    BuyOnDemand[] public BuyDemandOrders;
+    uint256 public BuyDemandMinAmount; //no decimals USDC
+
+
     /* ========== EVENTS ========== */
     // Operator
     event Initialized(address operator, uint256 at);
@@ -100,8 +116,9 @@ contract SafePOKT is ContractGuard {
     event ClaimTreasuryFee(address treasury, uint256 fee_amount);
     event RewardAdded(uint256 snapshotIndex, uint256 poktDistribution, uint256 usdDistribution, uint256 epochSellPrice, uint256 poktUnhold, uint256 poktCompound);
     event BuyPriceUpdate(uint256 newPrice);
-    event NodeAdded(uint256 newNodes, uint256 numNodes, uint256 newPOKT, uint256 stakedPOKT);
+    event NodeAdded(uint256 newNodes, uint256 numNodes, uint256 addPOKT, uint256 subPOKT, uint256 stakedPOKT);
     event HolderActionsToggled(bool enabled);
+    event DemandPoktStaked(uint256 poktAmount, uint256 poktPrice);
 
     //Holder
     event Deposited(address indexed holder, uint256 amountPokt, uint256 amountusd, uint256 holderCount);
@@ -115,39 +132,29 @@ contract SafePOKT is ContractGuard {
         require(operator == msg.sender, "caller is not the operator");
         _;
     }
-    modifier onlyTreasury() {
-        require(treasury == msg.sender, "caller is not the Treasury");
+
+    modifier onlyManager() {
+        require(treasury == msg.sender || operator == msg.sender, "not a Manager");
         _;
     }
+
     modifier onlyHolder() {
         require(holders[msg.sender].exists == true, "not a holder");
         _;
     }
+
     modifier onlyHolderActionsEnabled() {
         require(holderActionsEnabled == true, "holder actions disabled");
         _;
     }
+
     modifier notInitialized {
         require(!initialized, "already initialized");
         _;
     }
 
     modifier updateReward(address holder) {
-        if (holder != address(0)) {
-            Poktseat memory seat = holders[holder];
-            if (seat.exists && seat.lastEpoch <= latestSnapshotIndex()) { // "Lockup: Still investing your money"
-                if (seat.lastSnapshotIndex < latestSnapshotIndex() && seat.willingToClaim <= 100) // "Reward already updated to last index"
-                    ( seat.PoktReward , seat.rewardClaimable ) = RewardEarned(seat);
-                seat.lastSnapshotIndex = latestSnapshotIndex(); // reward added, reset claim index
-                if (seat.PoktUnHold > 0 && seat.PoktUnHoldEpoch > 0 && latestSnapshotIndex() >= seat.PoktUnHoldEpoch) {
-                    uint256 unholdvalue = seat.PoktUnHold.mul(safePoktHistory[seat.PoktUnHoldEpoch].poktSellPrice).div(tokenDecimals);
-                    seat.PoktUnHold = 0;
-                    seat.PoktUnHoldEpoch = 0;
-                    seat.rewardClaimable = seat.rewardClaimable.add(unholdvalue);
-                }
-                holders[holder] = seat;
-            }
-        }
+        updateRewardHolder(holder);
         _;
     }
 
@@ -164,7 +171,7 @@ contract SafePOKT is ContractGuard {
         protToken = _protToken;
 
         tokenDecimals = 10 ** 6; //Hardcoded for simplicity: 10**uint256(IERC20Upgradeable(protToken).decimals())
-        sharePoktNum = 10;
+        //sharePoktNum = 10;
 
         SafePoktSnapshot memory genesisSnapshot = SafePoktSnapshot({time: block.number, rewardPerPokt: 0, poktSellPrice: 0, feature1: 0, feature2: 0, rewardDeposit: 0, rewardReceived: 0});
         safePoktHistory.push(genesisSnapshot);
@@ -191,6 +198,23 @@ contract SafePOKT is ContractGuard {
 
 
     /* ========== Compute reward method (private) ========== */
+    function updateRewardHolder(address holder) private {
+        if (holder != address(0)) {
+            Poktseat memory seat = holders[holder];
+            if (seat.exists && seat.lastEpoch <= latestSnapshotIndex()) { // "Lockup: Still investing your money"
+                if (seat.lastSnapshotIndex < latestSnapshotIndex() && seat.willingToClaim <= 100) // "Reward already updated to last index"
+                    ( seat.PoktReward , seat.rewardClaimable ) = RewardEarned(seat);
+                seat.lastSnapshotIndex = latestSnapshotIndex(); // reward added, reset claim index
+                if (seat.PoktUnHold > 0 && seat.PoktUnHoldEpoch > 0 && latestSnapshotIndex() >= seat.PoktUnHoldEpoch) {
+                    uint256 unholdvalue = seat.PoktUnHold.mul(safePoktHistory[seat.PoktUnHoldEpoch].poktSellPrice).div(tokenDecimals);
+                    seat.PoktUnHold = 0;
+                    seat.PoktUnHoldEpoch = 0;
+                    seat.rewardClaimable = seat.rewardClaimable.add(unholdvalue);
+                }
+                holders[holder] = seat;
+            }
+        }
+    }
 
     function RewardEarned(Poktseat memory holder_seat) private view returns (uint256, uint256) {
         uint256 c = (holder_seat.lastSnapshotIndex).add(1);
@@ -253,15 +277,32 @@ contract SafePOKT is ContractGuard {
         ret[0] = address(msg.sender);
         return ret;
     }
-
-    function rewardPerPokt() internal view returns (uint256) {
-        return safePoktHistory[latestSnapshotIndex()].rewardPerPokt;
+    
+    function getNetAPR() public view returns (uint256) {
+	    return (nextDistributionPoktRPS.mul( 31556900000.div(epochDuration) ).div( getPoktPerShare().mul(100) ));  //RPS(pokt)*TimesIn1Year/PoktPerShare*100 = NET EPOCH APR (%)
     }
 
-    function getLastEpochAPR() public view returns (uint256) {
-        return ( rewardPerPokt().mul(52).mul(10) );
+    function checkPendingBuys() public view returns (uint256, uint256) {
+        uint256 totalUSDC = 0;
+        uint256 totalBuys = 0;
+        for (uint256 i = 0; i < BuyDemandOrders.length; ++i) {
+            if (BuyDemandOrders[i].holder == msg.sender) {
+                totalUSDC = totalUSDC.add(BuyDemandOrders[i].amountUSDC);
+                totalBuys++;
+            }
+        }
+        return (totalUSDC,totalBuys);
     }
 
+    function BuyDemandOrdersLen() public view returns (uint256) {
+        if (msg.sender == operator || msg.sender == treasury) return BuyDemandOrders.length;
+        return 0;
+    }
+
+    //Get Pokt Amount Per Share (in decimals)
+    function getPoktPerShare() public view returns (uint256) {
+        return ( totalPOKTStake.mul(tokenDecimals).div(totalInvestedShares) );
+    }
 
     /* ========== OPERATOR SETTERS ========== */
 
@@ -275,10 +316,11 @@ contract SafePOKT is ContractGuard {
         protToken = _tokenAddress;
     }
 
-    function addNodeCount(uint256 _count, uint256 poktbuy) external onlyOperator {
+    function addNodeCount(uint256 _count, uint256 _poktbuy, uint256 _poktsell) external onlyOperator {
         totalNodeCount = totalNodeCount.add(_count);
-        totalPOKTStake = totalPOKTStake.add(poktbuy);
-        emit NodeAdded(_count, totalNodeCount, poktbuy, totalPOKTStake);
+        totalPOKTStake = totalPOKTStake.add(_poktbuy);
+        totalPOKTStake = totalPOKTStake.sub(_poktsell);
+        emit NodeAdded(_count, totalNodeCount, _poktbuy, _poktsell, totalPOKTStake);
     }
 
     function setOperator(address _address) external onlyOperator {
@@ -293,19 +335,26 @@ contract SafePOKT is ContractGuard {
         fee = _fee;
     }
 
-    function setNodeDiscount(uint256 _discount) external onlyOperator {
-        nodeDiscount = _discount;
+    function setBuyDiscount(uint256 _discount, uint256 _maxDiscountAmount) external onlyOperator {
+        if ( _discount < 100 ) nodeDiscount = _discount;
+        if ( _maxDiscountAmount != 0 ) BuyDemandMinAmount = _maxDiscountAmount;
     }
 
-    function addNodeHolder(address _address) external onlyOperator {
-        nodeHolders.push(_address);
+    function setNextEpochDateTime(uint256 _nextDate, uint256 _epochDuration) external onlyManager {
+        if ( _nextDate != 0 && _nextDate > nextEpochDate )
+            nextEpochDate = _nextDate;
+        if ( _epochDuration != 0)
+            epochDuration = _epochDuration;
+    }
+
+    function setNextDistributionPoktRPS(uint256 _poktRewardEst) external onlyManager {
+        nextDistributionPoktRPS = _poktRewardEst;
     }
 
     /*
      @param _price: Buy $POKT price in tokendecimals
     */
-    function setBuyPoktPrice(uint256 _price) external {
-        require(treasury == msg.sender || operator == msg.sender, "not a Manager");
+    function setBuyPoktPrice(uint256 _price) external onlyManager {
         poktBuyPrice = _price;
         emit BuyPriceUpdate(_price);
     }
@@ -342,7 +391,7 @@ contract SafePOKT is ContractGuard {
         time: block.number,
         rewardPerPokt: (_amountPokt.sub(feepokt) ).mul(tokenDecimals).div(totalInvestedShares), // Current epoch Node rewards per pokt share (in pokt)
         poktSellPrice: _epochSellPrice,   // = totalTokenReward/(_amountPokt*GLOBAL_SHARES_CLAIM_RATE + _amountPoktUnhold)
-        feature1: 0,
+        feature1: epochDuration,
         feature2: 0,
         rewardDeposit: totalTokenReward, //Total $USDC
         rewardReceived: totalPoktReward //Total $POKT
@@ -353,6 +402,7 @@ contract SafePOKT is ContractGuard {
         accumulatedFees = accumulatedFees.add(feevalue);
 
         totalClaimableRewards = totalClaimableRewards.add( totalTokenReward.sub(feevalue) );
+        if (totalPoktShares > totalInvestedShares) totalPOKTStake = totalPOKTStake.add( totalPoktShares.sub(totalInvestedShares).mul(getPoktPerShare()).div(tokenDecimals) );
         totalInvestedShares = totalPoktShares;
 
 
@@ -364,6 +414,8 @@ contract SafePOKT is ContractGuard {
         emit RewardAdded( latestSnapshotIndex(), _amountPokt, _amountProtToken, _epochSellPrice, _amountPoktUnhold, totalEpochPoktCompound );
         totalEpochPoktCompound = 0;
         //stats
+        nextEpochDate = nextEpochDate.add( epochDuration );
+        nextDistributionPoktRPS = newSnapshot.rewardPerPokt;
         totalPOKTRewards = totalPOKTRewards.add( _amountPokt );
         totalPOKTwithdraw = totalPOKTwithdraw.add( _amountPoktUnhold.add( _amountPokt.mul(tokenDecimals).div(_epochSellPrice) ) );
         totalRewardsUSDC = totalRewardsUSDC.add(totalTokenReward.div(tokenDecimals));
@@ -385,7 +437,7 @@ contract SafePOKT is ContractGuard {
 
     /* ========== TREASURY METHODS ========== */
 
-    function claimFees() external onlyTreasury {
+    function claimFees() external onlyManager {
         uint256 _amount = accumulatedFees;
         accumulatedFees = 0;
         IERC20Upgradeable(protToken).safeTransfer(treasury, _amount);
@@ -435,10 +487,11 @@ contract SafePOKT is ContractGuard {
         uint256 poktReward = holders[msg.sender].PoktReward;
         if (poktReward > 0) {
             holders[msg.sender].PoktReward = 0;
-            uint256 compoundShares = poktReward.div(sharePoktNum);
+            uint256 compoundShares = poktReward.mul(tokenDecimals).div( getPoktPerShare() );
             holders[msg.sender].poktShareCount = holders[msg.sender].poktShareCount.add(compoundShares);
             totalEpochPoktCompound = totalEpochPoktCompound.add(poktReward);
 
+            totalPOKTStake = totalPOKTStake.add(poktReward);
             totalInvestedShares = totalInvestedShares.add(compoundShares);
             totalPoktShares = totalPoktShares.add(compoundShares);
 
@@ -465,21 +518,22 @@ contract SafePOKT is ContractGuard {
         return seat;
     }
 
-    function compute_discount(uint256 _amountShares) internal returns (uint256) {
-        if (_amountShares >= 770) {
-            uint256 discount;
-            if (_amountShares >= 1540) discount = nodeDiscount;
-            else discount = nodeDiscount.div(2);
-            return ( discount.mul( poktBuyPrice.mul(sharePoktNum).mul(_amountShares) ).div(100) );
-        }
-        return 0;
+    function compute_discount(uint256 _amountShares) public view returns (uint256) {
+
+        uint256 maxDiscountShares = BuyDemandMinAmount.mul(tokenDecimals).div( poktBuyPrice.mul(getPoktPerShare()).div(tokenDecimals) );
+        if (_amountShares > maxDiscountShares) _amountShares = maxDiscountShares;
+
+        uint256 discount = ( tokenDecimals.mul(_amountShares).div(maxDiscountShares) ).mul(nodeDiscount).div(100);
+
+        return ( discount.mul( poktBuyPrice.mul( getPoktPerShare() ).mul(_amountShares).div(tokenDecimals) ).div(tokenDecimals) );
+
     }
 
     function buyPoktShares(address _token, uint256 _amountShares) external onlyHolderActionsEnabled onlyOneBlock updateReward(msg.sender) {
         require(protToken == _token, "not protocol token");
         require(_amountShares >= 1, "min purchase is 1 share");
 
-        uint256 _amountWei = poktBuyPrice.mul(sharePoktNum).mul(_amountShares).sub(compute_discount(_amountShares));
+        uint256 _amountWei = poktBuyPrice.mul( getPoktPerShare() ).mul(_amountShares).div(tokenDecimals).sub(compute_discount(_amountShares));
         IERC20Upgradeable(protToken).safeTransferFrom(
             msg.sender,
             address(this),
@@ -491,8 +545,10 @@ contract SafePOKT is ContractGuard {
         if (!seat.exists) { //new holder
             seat = addNewHolder(msg.sender);
         }
-        else if (seat.lastSnapshotIndex <= latestSnapshotIndex()) // Dont add if you are in investing period
+        else if (seat.lastSnapshotIndex <= latestSnapshotIndex()) { // Dont add if you are in investing period
+            totalPOKTStake = totalPOKTStake.add( getPoktPerShare().mul(_amountShares) );
             totalInvestedShares = totalInvestedShares.add(_sharesDecimal);
+        }
 
         seat.poktShareCount = seat.poktShareCount.add(_sharesDecimal);
         holders[msg.sender] = seat;
@@ -505,15 +561,85 @@ contract SafePOKT is ContractGuard {
         totalInvestmentsInUSDC = totalInvestmentsInUSDC.add(_amountWei.div(tokenDecimals));
     }
 
+    function buyPoktOnDemand(address _token, uint256 _amount) external onlyHolderActionsEnabled onlyOneBlock updateReward(msg.sender) {
+        require(protToken == _token, "not protocol token");
+        require(_amount >= BuyDemandMinAmount, "insufficient amount");
+
+        uint256 _amountWei = _amount.mul(tokenDecimals);
+        IERC20Upgradeable(protToken).safeTransferFrom(
+            msg.sender,
+            address(this),
+            _amountWei
+        );
+
+        Poktseat memory seat = holders[msg.sender];
+        if (!seat.exists) //new holder
+            holders[msg.sender] = addNewHolder(msg.sender);
+
+        BuyDemandOrders.push( BuyOnDemand({ //New buy by demand
+        holder: msg.sender,
+        amountUSDC: _amountWei,
+        time: block.timestamp
+        }) );
+        newInvestments = newInvestments.add(_amountWei);
+
+        emit Deposited(msg.sender, 0, _amountWei, holderCount);
+
+        totalInvestmentsInUSDC = totalInvestmentsInUSDC.add(_amountWei.div(tokenDecimals));
+    }
+
+    // Method input is the BuyByDemand confirmation of X1 POKT for X2 USDC
+    // @_amountPokt -> integer NO decimals
+    // @_buyUSDC -> 6 decimals integer
+    function confirmDemandBuys(uint256 _amountPokt, uint256 _buyUSDC) external onlyManager {
+        require(BuyDemandOrders.length > 0, "no orders");
+        require(_buyUSDC > tokenDecimals, "no decimals");
+
+        uint256 buyPrice = _buyUSDC.div(_amountPokt);
+        bool end = false;
+        uint256 confirmUSDC = _buyUSDC;
+        do {
+            BuyOnDemand memory order = BuyDemandOrders[0];
+            uint256 usdc;
+            if (order.amountUSDC > confirmUSDC) {
+                usdc = confirmUSDC;
+                BuyDemandOrders[0].amountUSDC = BuyDemandOrders[0].amountUSDC.sub(usdc);
+                end = true;
+            } else {
+                usdc = order.amountUSDC;
+                BuyDemandOrders[0] = BuyDemandOrders[BuyDemandOrders.length - 1];
+                BuyDemandOrders.pop();
+            }
+
+            updateRewardHolder(order.holder);
+            uint256 poktDecimal = usdc.mul(tokenDecimals).div(buyPrice);
+            uint256 sharesDecimal = poktDecimal.mul(tokenDecimals).div( getPoktPerShare() );
+            holders[order.holder].poktShareCount = holders[order.holder].poktShareCount.add(sharesDecimal);
+            if (holders[order.holder].lastSnapshotIndex <= latestSnapshotIndex()) {
+                totalInvestedShares = totalInvestedShares.add(sharesDecimal);
+                totalPOKTStake = totalPOKTStake.add(poktDecimal);
+            }
+            totalPoktShares = totalPoktShares.add(sharesDecimal);
+            confirmUSDC = confirmUSDC.sub(usdc);
+            if (BuyDemandOrders.length == 0) require(confirmUSDC == 0, "extra funds");
+
+        } while ( BuyDemandOrders.length > 0 && !end);
+
+        emit DemandPoktStaked(_amountPokt, buyPrice);
+    }
+
     //Util Giveaway
-    function transferSharesTreasury(uint256 amount, address receiver) external onlyTreasury updateReward(msg.sender) updateReward(receiver) {
+    function transferSharesTreasury(uint256 amount, address receiver) external onlyManager updateReward(msg.sender) updateReward(receiver) {
 
         uint256 transferShares = amount.mul(tokenDecimals);
         require(holders[treasury].poktShareCount >= transferShares, "not enough shares");
 
         Poktseat memory seat = holders[receiver];
         if (!seat.exists) seat = addNewHolder(receiver);
-        if (seat.lastSnapshotIndex > latestSnapshotIndex()) totalInvestedShares = totalInvestedShares.sub(transferShares);
+        if (seat.lastSnapshotIndex > latestSnapshotIndex()) {
+            totalPOKTStake = totalPOKTStake.sub( getPoktPerShare().mul(transferShares).div(tokenDecimals) );
+            totalInvestedShares = totalInvestedShares.sub(transferShares);
+        }
 
         holders[msg.sender].poktShareCount = holders[msg.sender].poktShareCount.sub(transferShares);
         seat.poktShareCount = seat.poktShareCount.add(transferShares);
