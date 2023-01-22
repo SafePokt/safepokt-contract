@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// GPL-3.0 License
 
 pragma solidity ^0.8.0;
 
@@ -87,7 +87,7 @@ contract SafePOKT is ContractGuard {
     bool public initialized;
 
     uint256 public tokenDecimals; //integer (=10^6)
-    uint256 public sharePoktNum; // 1share price = 10 * poktBuyPrice - UNSED since Jan/23
+    uint256 public sharePoktNum; // 1share price = 10 * poktBuyPrice - UNUSED since Jan/23
 
     uint256 public totalEpochPoktCompound;
     uint256 public totalPOKTStake;
@@ -276,6 +276,10 @@ contract SafePOKT is ContractGuard {
         address[] memory ret = new address[](1);
         ret[0] = address(msg.sender);
         return ret;
+    }
+    
+    function getNetAPR() public view returns (uint256) {
+	    return nextDistributionPoktRPS.mul( 31556900000.div(epochDuration) ).div( getPoktPerShare().mul(100) );  //RPS(pokt)*TimesIn1Year/SharePerPokt*100 = NET APR (%)
     }
 
     function checkPendingBuys() public view returns (uint256, uint256) {
