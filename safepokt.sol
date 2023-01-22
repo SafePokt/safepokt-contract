@@ -279,7 +279,7 @@ contract SafePOKT is ContractGuard {
     }
     
     function getNetAPR() public view returns (uint256) {
-	    return (nextDistributionPoktRPS.mul( 31556900000.div(epochDuration) ).div( getPoktPerShare().mul(100) ));  //RPS(pokt)*TimesIn1Year/PoktPerShare*100 = NET EPOCH APR (%)
+	    return (nextDistributionPoktRPS.mul( 31556900000.div(epochDuration) ).div( getPoktPerShare().div(100) ));  //(RPS(pokt)*TimesIn1Year/PoktPerShare)*100 = NET EPOCH APR (%)
     }
 
     function checkPendingBuys() public view returns (uint256, uint256) {
