@@ -93,7 +93,7 @@ contract SafePOKT is ContractGuard {
     uint256 public totalPOKTStake;
 
     uint256 public nodeDiscount; // (%) max discount from share price
-    uint256 public maxDiscountShares;
+    //uint256 public maxDiscountShares; UNUSED ONLY FOR TESTING
 
     uint256 public nextEpochDate; // Millisecond date
     uint256 public epochDuration; // ms increment (1 week = 604800000)
