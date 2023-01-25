@@ -93,12 +93,12 @@ contract SafePOKT is ContractGuard {
     uint256 public totalPOKTStake;
 
     uint256 public nodeDiscount; // (%) max discount from share price
-    //uint256 public maxDiscountShares; UNUSED ONLY FOR TESTING
+    //uint256 public maxDiscountShares; //UNUSED ONLY FOR TESTING
 
     uint256 public nextEpochDate; // Millisecond date
     uint256 public epochDuration; // ms increment (1 week = 604800000)
 
-    uint256 nextDistributionPoktRPS;
+    uint256 public nextDistributionPoktRPS;
 
     struct BuyOnDemand {
         address holder;
@@ -277,9 +277,10 @@ contract SafePOKT is ContractGuard {
         ret[0] = address(msg.sender);
         return ret;
     }
-    
+
     function getNetAPR() public view returns (uint256) {
-	    return (nextDistributionPoktRPS.mul( 31556900000.div(epochDuration) ).div( getPoktPerShare().div(100) ));  //(RPS(pokt)*TimesIn1Year/PoktPerShare)*100 = NET EPOCH APR (%)
+        uint256 year_ms = 3155690000000000000;
+        return ( nextDistributionPoktRPS.mul( year_ms.div(epochDuration) ).div(getPoktPerShare()) );  //RPS(pokt)*TimesIn1Year/PoktPerShare*100 = NET EPOCH APR (%)
     }
 
     function checkPendingBuys() public view returns (uint256, uint256) {
