@@ -108,9 +108,16 @@ contract SafePOKT is ContractGuard {
     BuyOnDemand[] public BuyDemandOrders;
     uint256 public BuyDemandMinAmount; //no decimals USDC
 
-    address[] public SellOrders;
+    //address[] public SellOrders; //UNUSED ONLY FOR TESTING
 
     uint256 totalInvestmentsInWPOKT; //Total Invest From WPOKT
+
+    struct SellOrderData {
+        address holder;
+        uint256 time;
+    }
+    SellOrderData[] public SellOrdersArr;
+    uint256 public globalAPY;
 
     /* ========== EVENTS ========== */
     // Operator
@@ -284,10 +291,21 @@ contract SafePOKT is ContractGuard {
         return ret;
     }
 
-    function getNetAPR() public view returns (uint256) {
-        uint256 year_ms = 3155690000000000000;
+    function computeAPY() private view returns (uint256) {
+
+        uint256 year_ms = 31556952000000000;
         uint256 lastEpochDuration = safePoktHistory[latestSnapshotIndex()].feature1;
-        return ( nextDistributionPoktRPS.mul( year_ms.div(lastEpochDuration) ).div(getPoktPerShare()) );  //RPS(pokt)*TimesIn1Year/PoktPerShare*100 = NET EPOCH APR (%)
+        uint256 epochsPerYear = (year_ms.add( lastEpochDuration.mul(tokenDecimals) )).div( lastEpochDuration.mul(tokenDecimals) );
+        uint256 lastEpochPokt = safePoktHistory[latestSnapshotIndex()].rewardReceived;
+        uint256 rate = (lastEpochPokt.mul(tokenDecimals).div(totalPOKTStake)); // r
+        uint256 compoundFactor = rate.add(tokenDecimals); // 1 + r
+        uint256 apy = compoundFactor;
+        // Compute (1 + r) ** n, with n = epochsPerYear
+        for (uint256 i = 0; i < epochsPerYear - 1; ++i) {
+            apy = apy.mul(compoundFactor).div(tokenDecimals);
+        }
+        apy = (apy.sub(tokenDecimals)).mul(100); // APY (%)
+        return apy;
     }
 
     function checkPendingBuys() public view returns (uint256, uint256) {
@@ -308,7 +326,7 @@ contract SafePOKT is ContractGuard {
     }
 
     function SellOrdersLen() public view returns (uint256) {
-        if (msg.sender == operator || msg.sender == treasury) return SellOrders.length;
+        if (msg.sender == operator || msg.sender == treasury) return SellOrdersArr.length;
         return 0;
     }
 
@@ -362,6 +380,11 @@ contract SafePOKT is ContractGuard {
 
     function setNextDistributionPoktRPS(uint256 _poktRewardEst) external onlyManager {
         nextDistributionPoktRPS = _poktRewardEst;
+    }
+
+    function setGlobalAPY(uint256 _apy) external onlyManager {
+        if (_apy == 0) globalAPY = computeAPY();
+        else globalAPY = _apy;
     }
 
     /*
@@ -426,6 +449,8 @@ contract SafePOKT is ContractGuard {
         );
         emit RewardAdded( latestSnapshotIndex(), _amountPokt, _amountProtToken, _epochSellPrice, _amountPoktUnhold, totalEpochPoktCompound );
         totalEpochPoktCompound = 0;
+
+        globalAPY = computeAPY();
         //stats
         nextEpochDate = nextEpochDate.add( epochDuration );
         nextDistributionPoktRPS = newSnapshot.rewardPerPokt;
@@ -484,6 +509,7 @@ contract SafePOKT is ContractGuard {
     }
 
     function unHoldPoktOrder(uint256 _poktUnhold) external onlyHolderActionsEnabled onlyHolder onlyOneBlock updateReward(msg.sender) {
+        require(holders[msg.sender].PoktUnHold == 0, "only 1 unhold");
         require(_poktUnhold <= holders[msg.sender].PoktReward, "not enough $POKT holdings");
 
         if (holders[msg.sender].PoktReward > 0) {
@@ -658,7 +684,7 @@ contract SafePOKT is ContractGuard {
         seat.sellEpoch = 0;
         holders[holder] = seat;
 
-        SellOrders.push(holder);
+        SellOrdersArr.push( SellOrderData({ holder: holder, time: block.timestamp }) );
 
         totalPOKTStake = totalPOKTStake.sub(sellpokt);
         totalInvestedShares = totalInvestedShares.sub(_amountShares);
@@ -683,11 +709,11 @@ contract SafePOKT is ContractGuard {
         Poktseat memory seat = holders[holder];
         require(seat.sellShareAmount > 0 && seat.sellEpoch == 1, "can not confirm");
 
-        uint256 len = SellOrders.length;
+        uint256 len = SellOrdersLen();
         for (uint256 i = 0; i < len; ++i) {
-            if (SellOrders[i] == holder) {
-                SellOrders[i] = SellOrders[len-1];
-                SellOrders.pop();
+            if (SellOrdersArr[i].holder == holder) {
+                SellOrdersArr[i] = SellOrdersArr[len-1];
+                SellOrdersArr.pop();
                 break;
             }
         }
