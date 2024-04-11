@@ -30,8 +30,8 @@ contract SafePOKT is ContractGuard {
         uint256 lastEpoch; //integer - For lockups and claiming
 
         // reserved vars for sell share implementation (just memory allocated btw)
-        uint256 sellShareAmount; //reserved but not used
-        uint256 sellEpoch;  //reserved but not used
+        uint256 sellShareAmount; //USED since Apr/24 - maps the amount of POKT to be sold (2 decimals)
+        uint256 sellEpoch;  //USED since Apr/24 - used as boolean to indicate if user can claim the sell order
         // stat
         uint256 totalClaimedUSDC; //Holder total claimed (stat)
     }
@@ -42,7 +42,7 @@ contract SafePOKT is ContractGuard {
         uint256 poktSellPrice; // $POKT-$USDC epoch price rate
 
         // reserved vars for future implementations (just memory allocated btw)
-        uint256 feature1; //USED from Jan/23 - maps each epoch duration in ms
+        uint256 feature1; //USED since Jan/23 - maps each epoch duration in ms
         uint256 feature2;
         // Epoch stats
         uint256 rewardDeposit; // Total $USDC claimable deposited in the contract
@@ -108,6 +108,16 @@ contract SafePOKT is ContractGuard {
     BuyOnDemand[] public BuyDemandOrders;
     uint256 public BuyDemandMinAmount; //no decimals USDC
 
+    //address[] public SellOrders; //UNUSED ONLY FOR TESTING
+
+    uint256 totalInvestmentsInWPOKT; //Total Invest From WPOKT
+
+    struct SellOrderData {
+        address holder;
+        uint256 time;
+    }
+    SellOrderData[] public SellOrdersArr;
+    uint256 public globalAPY;
 
     /* ========== EVENTS ========== */
     // Operator
@@ -126,6 +136,9 @@ contract SafePOKT is ContractGuard {
     event ClaimRateUpdated(address indexed holder, uint256 percent);
     event UnHold(address indexed holder, uint256 poktUnhold, uint256 poktUnHoldEpoch);
     event Compounded(address indexed holder, uint256 poktStaked);
+    event SellOrder(address indexed holder, uint256 poktAmount, uint256 timestamp);
+    event DepositedWPOKT(address indexed holder, uint256 amountShares, uint256 amountPokt);
+
     /* ========== Modifiers =============== */
 
     modifier onlyOperator() {
@@ -278,10 +291,21 @@ contract SafePOKT is ContractGuard {
         return ret;
     }
 
-    function getNetAPR() public view returns (uint256) {
-        uint256 year_ms = 3155690000000000000;
+    function computeAPY() private view returns (uint256) {
+
+        uint256 year_ms = 31556952000000000;
         uint256 lastEpochDuration = safePoktHistory[latestSnapshotIndex()].feature1;
-        return ( nextDistributionPoktRPS.mul( year_ms.div(lastEpochDuration) ).div(getPoktPerShare()) );  //RPS(pokt)*TimesIn1Year/PoktPerShare*100 = NET EPOCH APR (%)
+        uint256 epochsPerYear = (year_ms.add( lastEpochDuration.mul(tokenDecimals) )).div( lastEpochDuration.mul(tokenDecimals) );
+        uint256 lastEpochPokt = safePoktHistory[latestSnapshotIndex()].rewardReceived;
+        uint256 rate = (lastEpochPokt.mul(tokenDecimals).div(totalPOKTStake)); // r
+        uint256 compoundFactor = rate.add(tokenDecimals); // 1 + r
+        uint256 apy = compoundFactor;
+        // Compute (1 + r) ** n, with n = epochsPerYear
+        for (uint256 i = 0; i < epochsPerYear - 1; ++i) {
+            apy = apy.mul(compoundFactor).div(tokenDecimals);
+        }
+        apy = (apy.sub(tokenDecimals)).mul(100); // APY (%)
+        return apy;
     }
 
     function checkPendingBuys() public view returns (uint256, uint256) {
@@ -298,6 +322,11 @@ contract SafePOKT is ContractGuard {
 
     function BuyDemandOrdersLen() public view returns (uint256) {
         if (msg.sender == operator || msg.sender == treasury) return BuyDemandOrders.length;
+        return 0;
+    }
+
+    function SellOrdersLen() public view returns (uint256) {
+        if (msg.sender == operator || msg.sender == treasury) return SellOrdersArr.length;
         return 0;
     }
 
@@ -351,6 +380,11 @@ contract SafePOKT is ContractGuard {
 
     function setNextDistributionPoktRPS(uint256 _poktRewardEst) external onlyManager {
         nextDistributionPoktRPS = _poktRewardEst;
+    }
+
+    function setGlobalAPY(uint256 _apy) external onlyManager {
+        if (_apy == 0) globalAPY = computeAPY();
+        else globalAPY = _apy;
     }
 
     /*
@@ -415,6 +449,8 @@ contract SafePOKT is ContractGuard {
         );
         emit RewardAdded( latestSnapshotIndex(), _amountPokt, _amountProtToken, _epochSellPrice, _amountPoktUnhold, totalEpochPoktCompound );
         totalEpochPoktCompound = 0;
+
+        globalAPY = computeAPY();
         //stats
         nextEpochDate = nextEpochDate.add( epochDuration );
         nextDistributionPoktRPS = newSnapshot.rewardPerPokt;
@@ -473,6 +509,7 @@ contract SafePOKT is ContractGuard {
     }
 
     function unHoldPoktOrder(uint256 _poktUnhold) external onlyHolderActionsEnabled onlyHolder onlyOneBlock updateReward(msg.sender) {
+        require(holders[msg.sender].PoktUnHold == 0, "only 1 unhold");
         require(_poktUnhold <= holders[msg.sender].PoktReward, "not enough $POKT holdings");
 
         if (holders[msg.sender].PoktReward > 0) {
@@ -522,10 +559,10 @@ contract SafePOKT is ContractGuard {
 
     function compute_discount(uint256 _amountShares) public view returns (uint256) {
 
-        uint256 maxDiscountShares = BuyDemandMinAmount.mul(tokenDecimals).div( poktBuyPrice.mul(getPoktPerShare()).div(tokenDecimals) );
-        if (_amountShares > maxDiscountShares) _amountShares = maxDiscountShares;
+        uint256 maxDiscountShares1 = BuyDemandMinAmount.mul(tokenDecimals).div( poktBuyPrice.mul(getPoktPerShare()).div(tokenDecimals) );
+        if (_amountShares > maxDiscountShares1) _amountShares = maxDiscountShares1;
 
-        uint256 discount = ( tokenDecimals.mul(_amountShares).div(maxDiscountShares) ).mul(nodeDiscount).div(100);
+        uint256 discount = ( tokenDecimals.mul(_amountShares).div(maxDiscountShares1) ).mul(nodeDiscount).div(100);
 
         return ( discount.mul( poktBuyPrice.mul( getPoktPerShare() ).mul(_amountShares).div(tokenDecimals) ).div(tokenDecimals) );
 
@@ -630,7 +667,102 @@ contract SafePOKT is ContractGuard {
         emit DemandPoktStaked(_amountPokt, buyPrice);
     }
 
+    //Sell method
+    // @param: _amountShares: amount shares with 6 decimals
+    function sellShares(uint256 _amountShares) external onlyHolderActionsEnabled onlyHolder onlyOneBlock updateReward(msg.sender) {
+        require(_amountShares > tokenDecimals, "");
+        address holder = msg.sender;
+        Poktseat memory seat = holders[holder];
+        require(seat.lastSnapshotIndex <= latestSnapshotIndex(), "not new holder");
+        require(seat.sellShareAmount == 0, "only 1 sell");
+        require(seat.poktShareCount >= _amountShares ,"insufficient shares");
+
+        uint256 sellpokt = _amountShares.mul( getPoktPerShare() ).div(tokenDecimals);
+
+        seat.poktShareCount = seat.poktShareCount.sub(_amountShares);
+        seat.sellShareAmount = sellpokt;
+        seat.sellEpoch = 0;
+        holders[holder] = seat;
+
+        SellOrdersArr.push( SellOrderData({ holder: holder, time: block.timestamp }) );
+
+        totalPOKTStake = totalPOKTStake.sub(sellpokt);
+        totalInvestedShares = totalInvestedShares.sub(_amountShares);
+        totalPoktShares = totalPoktShares.sub(_amountShares);
+
+        emit SellOrder(holder, sellpokt, block.timestamp);
+
+    }
+
+    function confirmSellSent(address _holder) external onlyManager updateReward(_holder) {
+        require(holders[_holder].sellShareAmount > 0, "no pending sell");
+        holders[_holder].sellEpoch = 1;
+    }
+
+    function confirmSellClaimed(address _holder) external onlyHolderActionsEnabled onlyHolder onlyOneBlock updateReward(msg.sender) {
+        address holder;
+        if (treasury == msg.sender) {
+            holder = _holder;
+            updateRewardHolder(holder);
+        } else holder = msg.sender;
+
+        Poktseat memory seat = holders[holder];
+        require(seat.sellShareAmount > 0 && seat.sellEpoch == 1, "can not confirm");
+
+        uint256 len = SellOrdersLen();
+        for (uint256 i = 0; i < len; ++i) {
+            if (SellOrdersArr[i].holder == holder) {
+                SellOrdersArr[i] = SellOrdersArr[len-1];
+                SellOrdersArr.pop();
+                break;
+            }
+        }
+        totalPOKTwithdraw = totalPOKTwithdraw.add(seat.sellShareAmount);
+
+        seat.sellShareAmount = 0;
+        seat.sellEpoch = 0;
+
+        holders[holder] = seat;
+    }
+
+    /* Remove from contract outdated tokens
+        - Introduced since multichain USDC deppeg (in order to not devaluate contract holdings)
+        @param _token: Address of the outdated token (can not be protocol token)
+        @param _amount: Transfer to operator amount (in tokendecimals)
+    */
+    function withdrawOutdatedTokens(address _token, uint256 _amount) external onlyOperator {
+        require(_token != protToken, "can not withdraw protToken");
+        IERC20Upgradeable(_token).safeTransfer(operator, _amount);
+    }
+
+    // Confirm WPOKT has been successfully bridged and received as POKT: executed by manager once WPOKT transfer is received
+    // @param _amountPokt -> 6 decimals -> pokt transfered
+    // @param _holder -> address -> holder
+    function confirmWPoktBridge(uint256 _amountPokt, address _holder) external onlyManager updateReward(_holder) {
+
+        uint256 _sharesDecimal = _amountPokt.mul(tokenDecimals).div( getPoktPerShare() );
+
+        Poktseat memory seat = holders[_holder];
+        if (!seat.exists) { //new holder
+            seat = addNewHolder(_holder);
+        }
+        else if (seat.lastSnapshotIndex <= latestSnapshotIndex()) { // Dont add if you are in investing period
+            totalInvestedShares = totalInvestedShares.add( _sharesDecimal );
+            totalPOKTStake = totalPOKTStake.add( _amountPokt );
+        }
+
+        totalPoktShares = totalPoktShares.add( _sharesDecimal );
+
+        seat.poktShareCount = seat.poktShareCount.add(_sharesDecimal);
+        holders[_holder] = seat;
+
+        emit DepositedWPOKT(_holder, _sharesDecimal, _amountPokt);
+
+        totalInvestmentsInWPOKT = totalInvestmentsInWPOKT.add(_amountPokt);
+    }
+
     //Util Giveaway
+    // @param amount: shares to transfer without decimals
     function transferSharesTreasury(uint256 amount, address receiver) external onlyManager updateReward(msg.sender) updateReward(receiver) {
 
         uint256 transferShares = amount.mul(tokenDecimals);
