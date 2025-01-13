@@ -694,22 +694,17 @@ contract SafePOKT is ContractGuard {
 
     }
 
-    function confirmSellSent(address _holder) external onlyManager updateReward(_holder) {
+    function confirmSellSent(address _holder, uint256 _id) external onlyManager updateReward(_holder) {
         require(holders[_holder].sellShareAmount > 0, "no pending sell");
-        holders[_holder].sellEpoch = 1;
+        holders[_holder].sellEpoch = _id;
     }
 
-    function confirmSellClaimed(address _holder) external onlyHolderActionsEnabled onlyHolder onlyOneBlock updateReward(msg.sender) {
-        address holder;
-        if (treasury == msg.sender) {
-            holder = _holder;
-            updateRewardHolder(holder);
-        } else holder = msg.sender;
-
+    function confirmSellClaimed() external onlyHolderActionsEnabled onlyHolder onlyOneBlock updateReward(msg.sender) {
+        address holder = msg.sender;
         Poktseat memory seat = holders[holder];
-        require(seat.sellShareAmount > 0 && seat.sellEpoch == 1, "can not confirm");
+        require(seat.sellShareAmount > 0 && seat.sellEpoch != 0, "can not confirm");
 
-        uint256 len = SellOrdersLen();
+        uint256 len = SellOrdersArr.length;
         for (uint256 i = 0; i < len; ++i) {
             if (SellOrdersArr[i].holder == holder) {
                 SellOrdersArr[i] = SellOrdersArr[len-1];
@@ -722,6 +717,46 @@ contract SafePOKT is ContractGuard {
         seat.sellShareAmount = 0;
         seat.sellEpoch = 0;
 
+        holders[holder] = seat;
+    }
+
+    function operateSellArray(address _holder, uint256 _deleteSell, uint256 _idSell, uint256 _amountSell) external onlyManager updateReward(_holder) {
+        require(_deleteSell == 1 || _deleteSell == 0, "invalid delete");
+        require(_deleteSell == 0 || (_idSell == 0 && _amountSell == 0), "can not operate");
+
+        address holder = _holder;
+        Poktseat memory seat = holders[holder];
+        uint256 len = SellOrdersArr.length;
+        if (_idSell != 0) {
+            seat.sellEpoch = _idSell;
+        }
+        if (_amountSell != 0) {
+            seat.sellShareAmount = _amountSell;
+        }
+        if (_idSell != 0 || _amountSell != 0) {
+            bool found = false;
+            for (uint256 i = 0; i < len; ++i) {
+                if (SellOrdersArr[i].holder == holder) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                SellOrdersArr.push( SellOrderData({ holder: holder, time: block.timestamp }) );
+            }
+        }
+
+        if (_deleteSell == 1) {           
+            for (uint256 i = 0; i < len; ++i) {
+                if (SellOrdersArr[i].holder == holder) {
+                    SellOrdersArr[i] = SellOrdersArr[len-1];
+                    SellOrdersArr.pop();
+                    break;
+                }
+            }
+            seat.sellEpoch = 0;
+            seat.sellShareAmount = 0;
+        }
         holders[holder] = seat;
     }
 
